@@ -1,0 +1,47 @@
+Captured 2026-10-09, after the first positive patched hardware tests.
+
+Arch Linux x86_64
+Running kernel: 7.2.9-arch1-1, PREEMPT_DYNAMIC
+nvidia-open-dkms 615.71.09-1
+nvidia-utils 615.71.09-1
+linux 7.2.9.arch1-1
+linux-lts 6.18.55-1 (installed, not the detailed before/after test kernel)
+systemd 262-1
+mangowm 0.17.5-1
+
+GPU: NVIDIA TU106 GeForce RTX 2070, PCI 0000:01:00.0, 10de:1f02 rev a1
+Additional display controller: Intel UHD Graphics 630, 8086:3e98
+Monitor EDID name: LG ULTRAGEAR; exact retail model not recorded.
+Connected DRM output: card1-DP-3 at inspection; NVKMS DP-4/display 0x2000.
+Actual test mode/refresh and monitor deep-sleep setting: not yet supplied.
+Link after recovery: four lanes, rate_10mhz=810.
+NVKMS API head 0 maps to hardware head 3 (mask 0x8) in this capture.
+Sleep: deep (s2idle [deep])
+nvidia_drm modeset=Y fbdev=Y
+
+Loaded NVIDIA parameters:
+UseKernelSuspendNotifiers=1
+PreserveVideoMemoryAllocations=2
+DynamicPowerManagement=3
+EnableGpuFirmware=0
+EnableGpuFirmwareLogs=2
+TemporaryFilePath=/var/tmp
+Do not infer GSP is disabled from EnableGpuFirmware=0: GSP RPCs are observed.
+
+nvidia-suspend.service: disabled
+nvidia-resume.service: disabled
+suspend-chvt.service: Before=systemd-suspend.service;
+  ExecStart=/usr/bin/chvt 2; ExecStartPost=/usr/bin/sleep 1
+systemd-suspend.service effective Environment:
+  SYSTEMD_SLEEP_FREEZE_USER_SESSIONS=true
+NeedDaemonReload=no at inspection.
+Drop-ins:
+  /usr/lib/systemd/system/systemd-suspend.service.d/10-nvidia-no-freeze-session.conf
+  /etc/systemd/system/systemd-suspend.service.d/override.conf
+The local override's contents were not read (permission denied), but systemd's
+effective value and successful freeze/thaw journal entries were confirmed.
+
+Failing diagnostic boot: 2b12cbef0d064432a5ee0617b0c4ca6d (2026-10-08)
+First successful patched test boot: fd88fa51009147b482c58b0f96878976 (2026-10-09)
+Same-version proprietary driver: not tested.
+Precise pre-upgrade known-good driver/kernel pair: not independently established.

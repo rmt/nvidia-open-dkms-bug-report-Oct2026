@@ -1,0 +1,377 @@
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -1141,6 +1141,7 @@
+ 
+     /* Local resume diagnostics: bounded packet logging, protected by NVKMS. */
+     NvU32               resumeDiagDpPacketsRemaining;
++    NvU32               resumeDiagDpEventsRemaining;
+     /*
+      * Indicates that hotplug events that occur while NVKMS is the modeset owner
+      * should trigger console restore modesets.
+@@ -2559,6 +2560,16 @@
+ 
+ }
+ 
++/* Local stage-two diagnostics; callers hold the NVKMS serialization lock. */
++static inline NvBool nvResumeDiagTakeDpEvent(NVDevEvoPtr pDevEvo)
++{
++    if (pDevEvo->resumeDiagDpEventsRemaining == 0) {
++        return FALSE;
++    }
++    pDevEvo->resumeDiagDpEventsRemaining--;
++    return TRUE;
++}
++
+ static inline NvBool nvHeadIsActive(const NVDispEvoRec *pDispEvo,
+                                     const NvU32 head)
+ {
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -427,6 +427,9 @@
+     NvBool releaseElv)
+ {
+     NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
++    const NvBool diagTrace = sync && pDevEvo->core != NULL &&
++        nvResumeDiagTakeDpEvent(pDevEvo);
++    NvU64 diagStartTime = 0;
+ 
+     // Calling code should reject operations that send updates while the console
+     // is active.
+@@ -440,15 +443,41 @@
+         pDevEvo->hal->InitCompNotifier(pDispEvo, notifier);
+     }
+ 
++    if (diagTrace) {
++        diagStartTime = nvkms_get_usec();
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: core update begin; notifier=%d notify=%u "
++                    "sync=%u active_heads=0x%x put=0x%x",
++                    notifier, notify, sync, nvGetActiveHeadMask(pDispEvo),
++                    pDevEvo->core->pb.put_offset);
++    }
++
+     pDevEvo->hal->SetNotifier(pDevEvo, notify, sync, notifier,
+                               updateState);
+     pDevEvo->hal->Update(pDevEvo, updateState, releaseElv);
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: core update returned; notifier=%d "
++                    "put=0x%x elapsed_ms=%u; entering notifier wait",
++                    notifier, pDevEvo->core->pb.put_offset,
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++
+     // Wait for completion.
+     if (sync) {
+         pDevEvo->hal->WaitForCompNotifier(pDispEvo, notifier);
+     }
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: core wait returned; notifier=%d "
++                    "active_heads=0x%x put=0x%x elapsed_ms=%u",
++                    notifier, nvGetActiveHeadMask(pDispEvo),
++                    pDevEvo->core->pb.put_offset,
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++
+     if (notify) {
+         const NVDispEvoRec *pDispEvoTmp;
+         NVEvoUpdateState coreUpdateState = { };
+@@ -5499,6 +5528,9 @@
+     NvU32 dispIndex;
+ 
+     pDevEvo->resumeDiagDpPacketsRemaining = 8;
++    pDevEvo->resumeDiagDpEventsRemaining = 64;
++    nvEvoLogDev(pDevEvo, EVO_LOG_INFO,
++                "RESUME-DIAG2: stage-two tracing enabled; event_budget=64");
+     nvEvoLogDev(pDevEvo, EVO_LOG_INFO,
+                 "RESUME-DIAG: device resume begin; dispClass=0x%x",
+                 pDevEvo->dispClass);
+--- a/src/nvidia-modeset/src/nvkms-rm.c
++++ b/src/nvidia-modeset/src/nvkms-rm.c
+@@ -2600,11 +2600,21 @@
+     NV0073_CTRL_SYSTEM_GET_CONNECT_STATE_PARAMS params = { 0 };
+     NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
+     NvU32 ret;
++    NvBool diagTrace;
++    NvU64 diagStartTime = 0;
+ 
+     if (pDevEvo->displaylessHw) {
+         return DisplaylessRmGetConnectedDpys(pDispEvo, dpyIdList);
+     }
+ 
++    diagTrace = nvResumeDiagTakeDpEvent(pDevEvo);
++    if (diagTrace) {
++        diagStartTime = nvkms_get_usec();
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: connect-state query begin; requested=0x%x",
++                    nvDpyIdListToNvU32(dpyIdList));
++    }
++
+     params.displayMask = nvDpyIdListToNvU32(dpyIdList);
+     params.flags =
+         (DRF_DEF(0073_CTRL_SYSTEM,_GET_CONNECT_STATE_FLAGS,_METHOD,_DEFAULT) |
+@@ -2634,6 +2644,14 @@
+         }
+     } while(params.retryTimeMs > 0);
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: connect-state query end; requested=0x%x "
++                    "returned=0x%x status=0x%x elapsed_ms=%u",
++                    nvDpyIdListToNvU32(dpyIdList), params.displayMask, ret,
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++
+     if (ret == NVOS_STATUS_SUCCESS) {
+         return nvNvU32ToDpyIdList(params.displayMask);
+     } else {
+--- a/src/nvidia-modeset/src/dp/nvdp-connector.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-connector.cpp
+@@ -120,6 +120,15 @@
+     NVDPLibConnectorPtr pNVDpLibConnector = pConnectorEvo->pDpLibConnector;
+     DisplayPort::Connector *c = pNVDpLibConnector->connector;
+ 
++    if (nvResumeDiagTakeDpEvent(pConnectorEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: HPD long pulse; connector=%s display=0x%x "
++                    "previous_plugged=%u plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pNVDpLibConnector->plugged, connected,
++                    pConnectorEvo->detectComplete);
++    }
++
+     pNVDpLibConnector->plugged = connected;
+ 
+     if (!pNVDpLibConnector->linkHandoffEnabled &&
+@@ -137,6 +146,15 @@
+ void nvDPNotifyShortPulse(NVDPLibConnectorPtr pNVDpLibConnector)
+ {
+     DisplayPort::Connector *c = pNVDpLibConnector->connector;
++    const NVConnectorEvoRec *pConnectorEvo = pNVDpLibConnector->pConnectorEvo;
++
++    if (nvResumeDiagTakeDpEvent(pConnectorEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: HPD short pulse; connector=%s display=0x%x "
++                    "plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pNVDpLibConnector->plugged, pConnectorEvo->detectComplete);
++    }
+ 
+     c->notifyShortPulse();
+ }
+@@ -853,6 +871,17 @@
+     const NvU32 newHeadMask =
+         nvConnectorGetAttachedHeadMaskEvo(pConnectorEvo);
+     DisplayPort::DpPreModesetParams preModesetParams = { };
++    const NvBool diagTrace = nvResumeDiagTakeDpEvent(pDispEvo->pDevEvo);
++
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP pre-modeset begin; connector=%s "
++                    "display=0x%x plugged=%u detect_complete=%u active=%u "
++                    "old_heads=0x%x new_heads=0x%x",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pDpLibConnector->plugged, pConnectorEvo->detectComplete,
++                    pDpLibConnector->isActive, oldHeadMask, newHeadMask);
++    }
+ 
+     for (NvU32 head = 0; head < pDispEvo->pDevEvo->numHeads; head++) {
+ 
+@@ -874,6 +903,13 @@
+     }
+ 
+     connector->dpPreModeset(preModesetParams);
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP pre-modeset returned; connector=%s "
++                    "display=0x%x plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pDpLibConnector->plugged, pConnectorEvo->detectComplete);
++    }
+ }
+ 
+ /*
+@@ -1033,6 +1069,18 @@
+     bool dpyIdIsDynamic = false;
+     /* By default allow MST */
+     bool allowMST = true;
++    const NvBool diagTrace = nvResumeDiagTakeDpEvent(pDispEvo->pDevEvo);
++
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP resume begin; connector=%s display=0x%x "
++                    "detected_plugged=%u previous_plugged=%u active=%u "
++                    "detect_complete=%u firmware_head=0x%x",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    plugged, pNVDpLibConnector->plugged,
++                    pNVDpLibConnector->isActive, pConnectorEvo->detectComplete,
++                    firmwareHead);
++    }
+ 
+     pNVDpLibConnector->linkHandoffEnabled =
+                             IsDDCPartnerActive(pNVDpLibConnector);
+@@ -1065,17 +1113,35 @@
+ 
+     pNVDpLibConnector->plugged = plugged;
+     if (plugged && !pNVDpLibConnector->headInFirmware) {
++        if (diagTrace) {
++            nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                        "RESUME-DIAG2: DP SOR assignment begin; connector=%s",
++                        pConnectorEvo->name);
++        }
+         NvBool ret = nvAssignSOREvo(pConnectorEvo,
+                                     nvDpyIdToNvU32(pConnectorEvo->displayId),
+                                     FALSE /* b2Heads1Or */,
+                                     0 /* sorExcludeMask */);
+ 
++        if (diagTrace) {
++            nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                        "RESUME-DIAG2: DP SOR assignment returned; "
++                        "connector=%s success=%u", pConnectorEvo->name, ret);
++        }
+         nvAssert(ret);
+         if (!ret) {
+             // DP lib skips LT for unassigned SOR.
+         }
+     }
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP library resume begin; connector=%s "
++                    "handoff=%u head_in_firmware=%u allow_mst=%u",
++                    pConnectorEvo->name, pNVDpLibConnector->linkHandoffEnabled,
++                    pNVDpLibConnector->headInFirmware, allowMST);
++    }
++
+     c->resume(pNVDpLibConnector->linkHandoffEnabled,
+               pNVDpLibConnector->headInFirmware,
+               plugged,
+@@ -1085,6 +1151,14 @@
+               true /* bDisableVbiosScratchRegisterUpdate, bug 200471345 */,
+               allowMST);
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP library resume returned; connector=%s "
++                    "plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, pNVDpLibConnector->plugged,
++                    pConnectorEvo->detectComplete);
++    }
++
+     for (NvU32 head = 0; head < ARRAY_LEN(pNVDpLibConnector->pGroup); head++) {
+         pNVDpLibConnector->pGroup[head] =
+             pNVDpLibConnector->connector->newGroup();
+@@ -1098,9 +1172,19 @@
+     }
+ 
+     pNVDpLibConnector->isActive = true;
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP resume end; connector=%s success=1",
++                    pConnectorEvo->name);
++    }
+     return TRUE;
+ 
+ failed:
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_ERROR,
++                    "RESUME-DIAG2: DP resume end; connector=%s success=0",
++                    pConnectorEvo->name);
++    }
+     pNVDpLibConnector->connector->pause();
+     return FALSE;
+ }
+--- a/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp
+@@ -463,6 +463,15 @@
+ {
+     pConnectorEvo->detectComplete = TRUE;
+ 
++    if (nvResumeDiagTakeDpEvent(pConnectorEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP detect complete; connector=%s "
++                    "display=0x%x plugged=%u active=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pConnectorEvo->pDpLibConnector->plugged,
++                    pConnectorEvo->pDpLibConnector->isActive);
++    }
++
+     // XXX[DP MST] potentially use this call to notify NV-CONTROL of topology
+     // change;
+ 
+@@ -672,6 +681,16 @@
+         sinkIsAudioCapable = pDpLibDevice->device->isAudioSink();
+     }
+ 
++    if (nvResumeDiagTakeDpEvent(pDpyEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pDpyEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP link configuration; connector=%s "
++                    "display=0x%x plugged=%u lanes=%u rate_10mhz=%u",
++                    pDpyEvo->pConnectorEvo->name,
++                    nvDpyIdToNvU32(pDpyEvo->id),
++                    dev != NULL && pDpLibDevice->isPlugged, laneCount,
++                    (NvU32)linkRate10MHz);
++    }
++
+     // The DisplayPort library reports a disabled link as 0 lanes.  NV-CONTROL,
+     // for historical reasons, uses a setting of "1 lane @ disabled" for a
+     // disabled link, so translate to that.
+--- a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
+@@ -29,6 +29,8 @@
+ 
+ #include "nvkms-rmapi.h"
+ 
++#include "ctrl/ctrl0073/ctrl0073dp.h"
++
+ #include "nvdp-connector-event-sink.hpp"
+ 
+ namespace nvkmsDisplayPort {
+@@ -42,12 +44,43 @@
+                                   NvU32 paramSize)
+ {
+     NVDevEvoPtr pDevEvo = pConnectorEvo->pDispEvo->pDevEvo;
++    NV0073_CTRL_DP_CTRL_PARAMS *pCtrl =
++        (command == NV0073_CTRL_CMD_DP_CTRL && params != NULL &&
++         paramSize == sizeof(NV0073_CTRL_DP_CTRL_PARAMS)) ?
++        static_cast<NV0073_CTRL_DP_CTRL_PARAMS *>(params) : NULL;
++    const NvBool diagTrace = pCtrl != NULL && nvResumeDiagTakeDpEvent(pDevEvo);
++    NvU64 diagStartTime = 0;
++
++    if (diagTrace) {
++        diagStartTime = nvkms_get_usec();
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP control begin; connector=%s "
++                    "display=0x%x cmd=0x%x data=0x%x lanes=%u bw_code=0x%x",
++                    pConnectorEvo->name, pCtrl->displayId, pCtrl->cmd,
++                    pCtrl->data,
++                    DRF_VAL(0073_CTRL, _DP_DATA, _SET_LANE_COUNT, pCtrl->data),
++                    DRF_VAL(0073_CTRL, _DP_DATA, _SET_LINK_BW, pCtrl->data));
++    }
+ 
+-    return nvRmApiControl(nvEvoGlobal.clientHandle,
++    const NvU32 ret = nvRmApiControl(nvEvoGlobal.clientHandle,
+                           pDevEvo->displayCommonHandle,
+                           command,
+                           params,
+                           paramSize);
++
++    if (diagTrace) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP control end; connector=%s display=0x%x "
++                    "status=0x%x err=0x%x retry_ms=%u clock_recovery_error=%u "
++                    "equalization_error=%u disconnected=%u elapsed_ms=%u",
++                    pConnectorEvo->name, pCtrl->displayId, ret, pCtrl->err,
++                    pCtrl->retryTimeMs,
++                    DRF_VAL(0073_CTRL_DP, _ERR, _CLOCK_RECOVERY, pCtrl->err),
++                    DRF_VAL(0073_CTRL_DP, _ERR, _CHANNEL_EQUALIZATION, pCtrl->err),
++                    DRF_VAL(0073_CTRL_DP, _ERR, _LINK_STATUS, pCtrl->err),
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++    return ret;
+ }
+ 
+ NvU32 EvoInterface::rmControl5070(NvU32 command, void * params,

@@ -1,0 +1,24 @@
+Extracted nvidia-drm-crtc.h: nv_drm_crtc_enqueue_flip
+Extracted nvidia-drm-crtc.h: nv_drm_crtc_dequeue_flip
+Extracted nvidia-drm-modeset.c: nv_drm_handle_flip_event_locked
+Extracted nvidia-drm-modeset.c: __nv_drm_handle_flip_event
+Extracted nvidia-drm-modeset.c: nv_drm_abort_submission
+Extracted nvidia-drm-modeset.c: nv_drm_end_submission
+Extracted modeset.c: successful no-HW-event defer block
+Running state reference API variant
+PASS FIFO A then B with deferred A IRQ and multi-event A
+PASS abort B old=1 transferred=1; event order, refs, targeted removal
+PASS abort B old=0 transferred=1; event order, refs, targeted removal
+PASS abort B old=1 transferred=0; event order, refs, targeted removal
+PASS abort B old=0 transferred=0; event order, refs, targeted removal
+PASS failed state retains one reference per affected CRTC without flips
+PASS A old pending, B failed, C successful without HW IRQ: A,B,C
+Running commit reference API variant
+PASS FIFO A then B with deferred A IRQ and multi-event A
+PASS abort B old=1 transferred=1; event order, refs, targeted removal
+PASS abort B old=0 transferred=1; event order, refs, targeted removal
+PASS abort B old=1 transferred=0; event order, refs, targeted removal
+PASS abort B old=0 transferred=0; event order, refs, targeted removal
+PASS failed state retains one reference per affected CRTC without flips
+PASS A old pending, B failed, C successful without HW IRQ: A,B,C
+PASS: driver inputs unchanged

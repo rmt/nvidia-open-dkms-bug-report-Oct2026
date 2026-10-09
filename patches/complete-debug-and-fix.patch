@@ -1,0 +1,1365 @@
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.c
+@@ -2356,10 +2356,25 @@
+     .atomic_check   = nv_drm_plane_atomic_check,
+ };
+ 
++void nv_drm_crtc_release_failed_states(struct nv_drm_crtc *nv_crtc)
++{
++    /* Each entry is embedded in the atomic state it keeps alive. */
++    while (!list_empty(&nv_crtc->failed_atomic_states)) {
++        struct nv_drm_failed_atomic_state *failed = list_first_entry(
++            &nv_crtc->failed_atomic_states,
++            struct nv_drm_failed_atomic_state, entry);
++        nv_drm_atomic_state_base_t *state = failed->state;
++
++        list_del_init(&failed->entry);
++        nv_drm_atomic_state_base_put(state);
++    }
++}
++
+ static void nv_drm_crtc_destroy(struct drm_crtc *crtc)
+ {
+     struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
+ 
++    nv_drm_crtc_release_failed_states(nv_crtc);
+     drm_crtc_cleanup(crtc);
+ 
+     nv_drm_free(nv_crtc);
+@@ -3242,6 +3257,8 @@
+         goto failed;
+     }
+ 
++    INIT_LIST_HEAD(&nv_crtc->failed_atomic_states);
++
+     nv_state = nv_drm_crtc_state_alloc();
+     if (nv_state == NULL) {
+         goto failed_state_alloc;
+--- a/kernel-open/nvidia-drm/nvidia-drm-crtc.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-crtc.h
+@@ -43,6 +43,14 @@
+ #include "nvkms-kapi.h"
+ #include "nv_drm_common_ioctl.h"
+ 
++struct nv_drm_failed_atomic_state {
++    struct list_head entry;
++    nv_drm_atomic_state_base_t *state;
++};
++
++struct nv_drm_crtc;
++void nv_drm_crtc_release_failed_states(struct nv_drm_crtc *nv_crtc);
++
+ struct nv_drm_crtc {
+     NvU32 head;
+ 
+@@ -69,6 +77,17 @@
+      */
+     struct list_head flip_list;
+ 
++    /* Protected by the DRM CRTC lock, not duplicated with atomic state. */
++    bool needs_full_modeset;
++    /* Nonblocking recovery keeps these references until a later successful
++     * blocking commit without timeout, or device teardown. Repeated failures
++     * may retain multiple transactions; reset deliberately does not free them. */
++    struct list_head failed_atomic_states;
++
++    /* Protected by dev->event_lock. Defer IRQs while submission may fail. */
++    bool flip_submission_pending;
++    unsigned int deferred_submission_events;
++
+     struct mutex vblank_q_lock;
+ 
+     /**
+@@ -113,6 +132,7 @@
+      * the state update.
+      */
+     struct drm_pending_vblank_event *event;
++    bool vblank_ref;
+ 
+     /**
+      * @pending_events
+@@ -337,7 +357,7 @@
+                                             struct nv_drm_flip *nv_flip)
+ {
+     spin_lock(&nv_crtc->flip_list_lock);
+-    list_add(&nv_flip->list_entry, &nv_crtc->flip_list);
++    list_add_tail(&nv_flip->list_entry, &nv_crtc->flip_list);
+     spin_unlock(&nv_crtc->flip_list_lock);
+ }
+ 
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -2316,13 +2316,19 @@
+     drm_connector_list_iter_end(&conn_iter);
+ 
+     /*
+-     * Delay the hotplug event: this is called from the resume path while
+-     * other devices are still resuming, and the system workqueue is not
+-     * frozen.  An immediate hotplug event could drive a modeset (fbdev
+-     * helper or DRM client) concurrently with the device-resume phase.
++     * NVKMS has resumed, but other devices may still be resuming.  Retain
++     * the settling delay before client modesets; this is not a PM barrier.
++     * Replace any pending HPD work's deadline rather than losing this
++     * reprobe to schedule_delayed_work() returning false.  Keep the same
++     * workqueue as HPD: queuing a running work item on a different queue
++     * would lose the workqueue's guarantee against concurrent execution.
++     *
++     * Do not deliver the event here, under dev_list_mutex, or from the
++     * NVKMS event thread: fbdev's hotplug callback can perform a modeset
++     * and needs NVKMS flip events to continue being processed.
+      */
+-    schedule_delayed_work(&nv_dev->hotplug_event_work,
+-                          msecs_to_jiffies(2000));
++    mod_delayed_work(system_wq, &nv_dev->hotplug_event_work,
++                     msecs_to_jiffies(2000));
+ }
+ 
+ /*
+@@ -2387,7 +2393,18 @@
+             drm_mode_config_reset(dev);
+         } else {
+ #if defined(NV_DRM_FBDEV_AVAILABLE)
++            /*
++             * Unfreeze fbdev even if restoring its cached configuration
++             * fails because a DP sink is absent.  The deferred hotplug
++             * below reprobes the outputs and retries fbdev configuration;
++             * leaving fbdev suspended would prevent that recovery.
++             */
++            NV_DRM_DEV_LOG_INFO(nv_dev,
++                "RESUME-DIAG: framebuffer console restore begin (helper=%s)",
++                dev->fb_helper != NULL ? "present" : "absent");
+             drm_fb_helper_set_suspend_unlocked(dev->fb_helper, 0);
++            NV_DRM_DEV_LOG_INFO(nv_dev,
++                "RESUME-DIAG: framebuffer console restore complete");
+ #endif
+             drm_kms_helper_poll_enable(dev);
+ 
+@@ -2406,13 +2423,18 @@
+              * with resume may also have latched a stale "disconnected"
+              * status.  Force a re-probe of all connectors and send a
+              * hotplug event so the DRM client re-detects and restores
+-             * the mode, like nv_drm_dev_load() does at boot.  Restrict
+-             * this to SoC products with dGPU-class display so other
+-             * GPUs keep the stock resume behavior.
++             * the mode, like nv_drm_dev_load() does at boot.
++             *
++             * Desktop DP sinks can also be absent during resume.  In
++             * that case the initial cached fbdev restore can fail, so
++             * reprobe on every modeset device, even without an HPD edge,
++             * and let the hotplug clients retry with the current outputs.
++             * A later power-on HPD uses the same hotplug worker to probe
++             * and restore the newly connected sink normally.
+              */
+-            if (nv_dev->isSocDgpuDisplayNeedingWar) {
+-                nv_drm_reprobe_connectors(nv_dev);
+-            }
++            NV_DRM_DEV_LOG_INFO(nv_dev,
++                "RESUME-FIX: scheduling connector reprobe and hotplug");
++            nv_drm_reprobe_connectors(nv_dev);
+         }
+     }
+ 
+--- a/kernel-open/nvidia-drm/nvidia-drm-modeset.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-modeset.c
+@@ -48,9 +48,14 @@
+ #endif
+ 
+ #include <linux/dma-fence.h>
++#include <linux/atomic.h>
+ 
+ struct nv_drm_atomic_state {
+     struct NvKmsKapiRequestedModeSetConfig config;
++    struct nv_drm_flip *submission_flip[NVKMS_KAPI_MAX_HEADS];
++    bool submission_queued[NVKMS_KAPI_MAX_HEADS];
++    struct nv_drm_failed_atomic_state failed[NVKMS_KAPI_MAX_HEADS];
++    struct list_head fence_semaphores;
+     nv_drm_atomic_state_base_t base;
+ };
+ 
+@@ -72,6 +77,7 @@
+         return NULL;
+     }
+ 
++    INIT_LIST_HEAD(&nv_state->fence_semaphores);
+     return &nv_state->base;
+ }
+ 
+@@ -162,8 +168,47 @@
+     struct dma_fence_cb dma_fence_cb;
+     struct nv_drm_device *nv_dev;
+     NvU32 semaphore_index;
++    atomic_t refs;
++    spinlock_t lock;
++    bool canceled;
++    struct list_head transaction_entry;
++    struct NvKmsKapiLayerRequestedConfig *plane_req_config;
+ };
+ 
++static void nv_drm_plane_fence_cb_data_put(
++    struct nv_drm_plane_fence_cb_data *fence_data)
++{
++    if (atomic_dec_and_test(&fence_data->refs)) {
++        nv_drm_free(fence_data);
++    }
++}
++
++/* Called once after the KAPI decision, also on fence-conversion errors. */
++static void nv_drm_finish_fence_semaphores(
++    nv_drm_atomic_state_base_t *state, bool cancel)
++{
++    struct list_head *reservations = &to_nv_atomic_state(state)->fence_semaphores;
++
++    while (!list_empty(reservations)) {
++        struct nv_drm_plane_fence_cb_data *fence_data = list_first_entry(
++            reservations, struct nv_drm_plane_fence_cb_data, transaction_entry);
++        unsigned long flags;
++
++        list_del_init(&fence_data->transaction_entry);
++        if (cancel) {
++            spin_lock_irqsave(&fence_data->lock, flags);
++            fence_data->canceled = true;
++            nvKms->cancelDisplaySemaphore(fence_data->nv_dev->pDevice,
++                                          fence_data->semaphore_index);
++            spin_unlock_irqrestore(&fence_data->lock, flags);
++            /* Do not leave a reusable semaphore slot in the desired state. */
++            fence_data->plane_req_config->config.syncParams.semaphoreSpecified =
++                false;
++        }
++        nv_drm_plane_fence_cb_data_put(fence_data); /* transaction reference */
++    }
++}
++
+ static void
+ __nv_drm_plane_fence_cb(
+     struct dma_fence *fence,
+@@ -172,11 +217,16 @@
+ {
+     struct nv_drm_plane_fence_cb_data *fence_data =
+         container_of(cb_data, typeof(*fence_data), dma_fence_cb);
+-    struct nv_drm_device *nv_dev = fence_data->nv_dev;
++    unsigned long flags;
+ 
+     dma_fence_put(fence);
+-    nvKms->signalDisplaySemaphore(nv_dev->pDevice, fence_data->semaphore_index);
+-    nv_drm_free(fence_data);
++    spin_lock_irqsave(&fence_data->lock, flags);
++    if (!fence_data->canceled) {
++        nvKms->signalDisplaySemaphore(fence_data->nv_dev->pDevice,
++                                      fence_data->semaphore_index);
++    }
++    spin_unlock_irqrestore(&fence_data->lock, flags);
++    nv_drm_plane_fence_cb_data_put(fence_data); /* callback reference */
+ }
+ 
+ static int __nv_drm_convert_in_fences(
+@@ -274,11 +324,18 @@
+                 nv_dev,
+                 "Failed to allocate callback data for plane fence");
+             nvKms->cancelDisplaySemaphore(nv_dev->pDevice, semaphore_index);
++            plane_req_config->config.syncParams.semaphoreSpecified = false;
+             return -ENOMEM;
+         }
+ 
+         fence_data->nv_dev = nv_dev;
+         fence_data->semaphore_index = semaphore_index;
++        fence_data->plane_req_config = plane_req_config;
++        atomic_set(&fence_data->refs, 2);
++        spin_lock_init(&fence_data->lock);
++        INIT_LIST_HEAD(&fence_data->transaction_entry);
++        list_add_tail(&fence_data->transaction_entry,
++                      &to_nv_atomic_state(state)->fence_semaphores);
+ 
+         ret = dma_fence_add_callback(plane_state->fence,
+                                      &fence_data->dma_fence_cb,
+@@ -306,7 +363,9 @@
+                 nv_dev,
+                 "Failed plane fence callback registration");
+             /* Fence callback registration failed */
++            list_del_init(&fence_data->transaction_entry);
+             nvKms->cancelDisplaySemaphore(nv_dev->pDevice, semaphore_index);
++            plane_req_config->config.syncParams.semaphoreSpecified = false;
+             nv_drm_free(fence_data);
+             return ret;
+         }
+@@ -396,7 +455,8 @@
+ static int
+ nv_drm_atomic_apply_modeset_config(struct drm_device *dev,
+                                    nv_drm_atomic_state_base_t *state,
+-                                   bool commit)
++                                   bool commit,
++                                   bool *applied)
+ {
+     struct nv_drm_device *nv_dev = to_nv_device(dev);
+     struct NvKmsKapiRequestedModeSetConfig *requested_config =
+@@ -407,6 +467,10 @@
+     int i;
+     int ret;
+ 
++    if (applied != NULL) {
++        *applied = false;
++    }
++
+     /*
+      * If sub-owner permission was granted to another NVKMS client, disallow
+      * modesets through the DRM interface.
+@@ -451,6 +515,8 @@
+             }
+ 
+             nv_new_crtc_state->nv_flip->event = new_crtc_state->event;
++            to_nv_atomic_state(state)->submission_flip[nv_crtc->head] =
++                nv_new_crtc_state->nv_flip;
+             nv_new_crtc_state->nv_flip->pending_events = 0;
+             new_crtc_state->event = NULL;
+ 
+@@ -460,11 +526,13 @@
+              */
+             if (__will_generate_flip_event(crtc, old_crtc_state)) {
+                 if (nv_drm_vblank_module_param && nv_new_crtc_state->nv_flip->event != NULL) {
+-                    drm_crtc_vblank_get(crtc);
++                    nv_new_crtc_state->nv_flip->vblank_ref =
++                        drm_crtc_vblank_get(crtc) == 0;
+                 }
+ 
+                 nv_drm_crtc_enqueue_flip(nv_crtc,
+                                          nv_new_crtc_state->nv_flip);
++                to_nv_atomic_state(state)->submission_queued[nv_crtc->head] = true;
+ 
+                 nv_new_crtc_state->nv_flip = NULL;
+             }
+@@ -486,6 +554,18 @@
+         requested_config->headRequestedConfig[nv_crtc->head] =
+             to_nv_crtc_state(new_crtc_state)->req_config;
+ 
++        /* A rejected post-swap update made DRM's delta unreliable. */
++        if (nv_crtc->needs_full_modeset) {
++            requested_config->headRequestedConfig[nv_crtc->head].
++                flags.modeChanged = NV_TRUE;
++            requested_config->headRequestedConfig[nv_crtc->head].
++                flags.activeChanged = NV_TRUE;
++            /* SET_MODE restores layers/cursor with bFromKmsSetMode=TRUE;
++             * dithering is the remaining field still gated by its delta. */
++            requested_config->headRequestedConfig[nv_crtc->head].
++                flags.ditheringChanged = NV_TRUE;
++        }
++
+         requested_config->headsMask |= 1 << nv_crtc->head;
+     }
+ 
+@@ -504,6 +584,10 @@
+         return -EINVAL;
+     }
+ 
++    if (applied != NULL) {
++        *applied = true;
++    }
++
+ #ifdef NV_DRM_SUPPORT_CONTENT_PROTECTION_PROPERTY
+     if (commit) {
+         struct drm_connector *connector;
+@@ -643,7 +727,7 @@
+     }
+ 
+     ret = nv_drm_atomic_apply_modeset_config(dev,
+-                                             state, false /* commit */);
++                                             state, false /* commit */, NULL);
+ 
+ done:
+     return ret;
+@@ -696,31 +780,23 @@
+ }
+ 
+ /**
+- * __nv_drm_handle_flip_event - handle flip occurred event
++ * nv_drm_handle_flip_event_locked - handle flip occurred event
+  * @nv_crtc: crtc on which flip has been occurred
+  *
+  * This handler dequeues the first nv_drm_flip from the crtc's flip_list,
+  * generates an event if requested at flip time, and frees the nv_drm_flip.
+  */
+-static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
++static void nv_drm_handle_flip_event_locked(struct nv_drm_crtc *nv_crtc)
+ {
+-    struct drm_device *dev = nv_crtc->base.dev;
+-    struct nv_drm_device *nv_dev = to_nv_device(dev);
+     struct nv_drm_flip *nv_flip;
+ 
+-    /*
+-     * Acquire event_lock before nv_flip object dequeue, otherwise immediate
+-     * flip event delivery from nv_drm_atomic_commit() races ahead and
+-     * messes up with event delivery order.
+-     */
+-    spin_lock(&dev->event_lock);
+     nv_flip = nv_drm_crtc_dequeue_flip(nv_crtc);
+     if (likely(nv_flip != NULL)) {
+         struct nv_drm_flip *nv_deferred_flip, *nv_next_deferred_flip;
+ 
+         if (nv_flip->event != NULL) {
+             nv_drm_crtc_send_vblank_event(&nv_crtc->base, nv_flip->event);
+-            if (nv_drm_vblank_module_param) {
++            if (nv_flip->vblank_ref) {
+                 drm_crtc_vblank_put(&nv_crtc->base);
+             }
+         }
+@@ -736,7 +812,7 @@
+             if (nv_deferred_flip->event != NULL) {
+                 nv_drm_crtc_send_vblank_event(&nv_crtc->base,
+                                               nv_deferred_flip->event);
+-                if (nv_drm_vblank_module_param) {
++                if (nv_deferred_flip->vblank_ref) {
+                     drm_crtc_vblank_put(&nv_crtc->base);
+                 }
+             }
+@@ -745,11 +821,154 @@
+             nv_drm_free(nv_deferred_flip);
+         }
+     }
++    nv_drm_free(nv_flip);
++}
++
++static void __nv_drm_handle_flip_event(struct nv_drm_crtc *nv_crtc)
++{
++    struct drm_device *dev = nv_crtc->base.dev;
++
++    /* event_lock precedes flip_list_lock, including deferred IRQ replay. */
++    spin_lock(&dev->event_lock);
++    if (nv_crtc->flip_submission_pending) {
++        nv_crtc->deferred_submission_events++;
++        spin_unlock(&dev->event_lock);
++        return;
++    }
++    nv_drm_handle_flip_event_locked(nv_crtc);
+     spin_unlock(&dev->event_lock);
++    wake_up_all(&to_nv_device(dev)->flip_event_wq);
++}
++
++/* The CRTC locks serialize this transaction against later DRM commits. */
++static void nv_drm_abort_submission(struct drm_device *dev,
++                                    nv_drm_atomic_state_base_t *state)
++{
++    struct nv_drm_atomic_state *nv_state = to_nv_atomic_state(state);
++    struct nv_drm_device *nv_dev = to_nv_device(dev);
++    struct drm_crtc *crtc;
++    struct drm_crtc_state *crtc_state;
++    int i;
++
++    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
++        struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
++        struct nv_drm_crtc_state *nv_crtc_state = to_nv_crtc_state(crtc_state);
++        struct nv_drm_flip *flip = nv_state->submission_flip[nv_crtc->head];
++        struct nv_drm_flip *candidate;
++        bool found = false;
++        bool deferred = false;
++        struct nv_drm_failed_atomic_state *failed =
++            &nv_state->failed[nv_crtc->head];
++
++        nv_crtc->needs_full_modeset = true;
++        /* Hardware can still scan the old state. Keep one transaction
++         * reference per affected CRTC until each has really recovered. */
++        INIT_LIST_HEAD(&failed->entry);
++        failed->state = state;
++#if defined(NV_DRM_ATOMIC_COMMIT_STRUCT_PRESENT)
++        drm_atomic_commit_get(state);
++#else
++        drm_atomic_state_get(state);
++#endif
++        list_add_tail(&failed->entry, &nv_crtc->failed_atomic_states);
++
++        spin_lock(&dev->event_lock);
++        spin_lock(&nv_crtc->flip_list_lock);
++        list_for_each_entry(candidate, &nv_crtc->flip_list, list_entry) {
++            if (candidate == flip) {
++                list_del_init(&candidate->list_entry);
++                found = true;
++                break;
++            }
++        }
++        spin_unlock(&nv_crtc->flip_list_lock);
+ 
++        if (!found) {
++            /* Also covers failure before the event was transferred. */
++            flip = nv_crtc_state->nv_flip;
++        }
++        if (flip != NULL && crtc_state->event != NULL) {
++            flip->event = crtc_state->event;
++            crtc_state->event = NULL;
++        }
++        if (flip != NULL) {
++            if (nv_crtc_state->nv_flip == flip) {
++                nv_crtc_state->nv_flip = NULL;
++            }
++            /* Complete in submission order, without expecting a rejected
++             * transaction to generate a hardware interrupt of its own. */
++            spin_lock(&nv_crtc->flip_list_lock);
++            if (!list_empty(&nv_crtc->flip_list)) {
++                struct nv_drm_flip *last = list_last_entry(
++                    &nv_crtc->flip_list, struct nv_drm_flip, list_entry);
++                list_add_tail(&flip->list_entry, &last->deferred_flip_list);
++                deferred = true;
++            }
++            spin_unlock(&nv_crtc->flip_list_lock);
++        }
++        if (flip != NULL && !deferred) {
++            if (flip->event != NULL) {
++                nv_drm_crtc_send_vblank_event(crtc, flip->event);
++                flip->event = NULL;
++            }
++            if (flip->vblank_ref) {
++                drm_crtc_vblank_put(crtc);
++                flip->vblank_ref = false;
++            }
++        }
++        if (crtc_state->event != NULL) {
++            nv_drm_crtc_send_vblank_event(crtc, crtc_state->event);
++            crtc_state->event = NULL;
++        }
++        spin_unlock(&dev->event_lock);
++        if (!deferred) {
++            nv_drm_free(flip);
++        }
++        nv_state->submission_flip[nv_crtc->head] = NULL;
++        NV_DRM_DEV_LOG_INFO(nv_dev,
++            "DP-RESUME: atomic recovery; head=%u queued_flip_removed=%u "
++            "completion_resolved=1 old_state_retained=1 force_set_mode=1",
++            nv_crtc->head, found);
++    }
+     wake_up_all(&nv_dev->flip_event_wq);
++}
+ 
+-    nv_drm_free(nv_flip);
++static void nv_drm_end_submission(struct drm_device *dev,
++                                  nv_drm_atomic_state_base_t *state)
++{
++    struct drm_crtc *crtc;
++    struct drm_crtc_state *crtc_state;
++    int i;
++
++    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
++        struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
++        unsigned int events;
++
++        spin_lock(&dev->event_lock);
++        nv_crtc->flip_submission_pending = false;
++        events = nv_crtc->deferred_submission_events;
++        nv_crtc->deferred_submission_events = 0;
++        /* On rejection these events belong only to earlier submissions. */
++        while (events-- != 0 && !list_empty(&nv_crtc->flip_list)) {
++            nv_drm_handle_flip_event_locked(nv_crtc);
++        }
++        spin_unlock(&dev->event_lock);
++        wake_up_all(&to_nv_device(dev)->flip_event_wq);
++    }
++}
++
++static void nv_drm_schedule_failed_modeset_reprobe(struct nv_drm_device *nv_dev)
++{
++    struct drm_connector *connector;
++    struct drm_connector_list_iter iter;
++
++    drm_connector_list_iter_begin(nv_dev->dev, &iter);
++    drm_for_each_connector_iter(connector, &iter) {
++        nv_drm_connector_mark_connection_status_dirty(to_nv_connector(connector));
++    }
++    drm_connector_list_iter_end(&iter);
++    mod_delayed_work(system_wq, &nv_dev->hotplug_event_work,
++                     msecs_to_jiffies(2000));
+ }
+ 
+ int nv_drm_atomic_commit(struct drm_device *dev,
+@@ -762,6 +981,7 @@
+     struct drm_crtc *crtc = NULL;
+     struct drm_crtc_state *crtc_state = NULL;
+     struct nv_drm_device *nv_dev = to_nv_device(dev);
++    bool applied = false;
+ 
+     /*
+      * XXX: drm_mode_config_funcs::atomic_commit() mandates to return -EBUSY
+@@ -836,17 +1056,42 @@
+      * calling drm_atomic_helper_swap_state().
+      */
+ 
+-    if ((ret = nv_drm_atomic_apply_modeset_config(
+-                    dev,
+-                    state, true /* commit */)) != 0) {
++    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
++        struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
++        spin_lock(&dev->event_lock);
++        nv_crtc->flip_submission_pending = true;
++        spin_unlock(&dev->event_lock);
++    }
++
++    ret = nv_drm_atomic_apply_modeset_config(
++                    dev, state, true /* commit */, &applied);
++    nv_drm_finish_fence_semaphores(state, !applied);
++    if (ret != 0) {
+         NV_DRM_DEV_LOG_ERR(
+             nv_dev,
+             "Failed to apply atomic modeset.  Error code: %d",
+             ret);
+ 
+-        goto done;
++        if (!applied) {
++            nv_drm_abort_submission(dev, state);
++            nv_drm_end_submission(dev, state);
++            nv_drm_schedule_failed_modeset_reprobe(nv_dev);
++            goto done;
++        }
++        /* A later reply-copy error must not abort submitted hardware work. */
+     }
+ 
++    for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
++        struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
++        if (nv_crtc->needs_full_modeset) {
++            NV_DRM_DEV_LOG_INFO(nv_dev,
++                "DP-RESUME: recovery hardware apply accepted; head=%u "
++                "nonblock=%u", nv_crtc->head, nonblock);
++        }
++        nv_crtc->needs_full_modeset = false;
++    }
++    nv_drm_end_submission(dev, state);
++
+     for_each_old_crtc_in_state(state, crtc, crtc_state, i) {
+         struct nv_drm_crtc *nv_crtc = to_nv_crtc(crtc);
+         struct nv_drm_crtc_state *nv_new_crtc_state =
+@@ -871,10 +1116,11 @@
+                                     struct nv_drm_flip, list_entry);
+ 
+                 if (nv_drm_vblank_module_param && nv_new_crtc_state->nv_flip->event != NULL) {
+-                    drm_crtc_vblank_get(crtc);
++                    nv_new_crtc_state->nv_flip->vblank_ref =
++                        drm_crtc_vblank_get(crtc) == 0;
+                 }
+ 
+-                list_add(&nv_new_crtc_state->nv_flip->list_entry,
++                list_add_tail(&nv_new_crtc_state->nv_flip->list_entry,
+                     &nv_last_flip->deferred_flip_list);
+ 
+                 nv_new_crtc_state->nv_flip = NULL;
+@@ -899,6 +1145,7 @@
+         }
+ 
+         if (!nonblock) {
++            bool timed_out = false;
+             /*
+              * Here you aren't required to hold nv_drm_crtc::flip_list_lock
+              * because:
+@@ -930,10 +1177,21 @@
+                 NV_DRM_DEV_LOG_ERR(
+                     nv_dev,
+                     "Flip event timeout on head %u", nv_crtc->head);
++                timed_out = true;
+                 while (!list_empty(&nv_crtc->flip_list)) {
+                     __nv_drm_handle_flip_event(nv_crtc);
+                 }
+             }
++            /* Never release old scanout resources on synthetic completion. */
++            if (!timed_out &&
++                to_nv_atomic_state(state)->submission_queued[nv_crtc->head]) {
++                if (!list_empty(&nv_crtc->failed_atomic_states)) {
++                    NV_DRM_DEV_LOG_INFO(nv_dev,
++                        "DP-RESUME: recovery old states released; head=%u "
++                        "blocking_commit=1 timeout=0", nv_crtc->head);
++                }
++                nv_drm_crtc_release_failed_states(nv_crtc);
++            }
+         }
+     }
+ 
+--- a/src/nvidia-modeset/include/dp/nvdp-connector.h
++++ b/src/nvidia-modeset/include/dp/nvdp-connector.h
+@@ -38,6 +38,11 @@
+ void nvDPSetClientForcedConnected(NVConnectorEvoPtr pConnectorEvo,
+                         NvBool enabled);
+ 
++/* Cached presence policy for SET_MODE configurations, not mode queries. */
++NvBool nvDPIsDpyActivationAllowed(
++    const NVDPLibConnectorRec *pDpLibConnector,
++    const NVDpyEvoRec *pDpyEvo);
++
+ void nvDPNotifyShortPulse(NVDPLibConnectorPtr pNVDpLibConnector);
+ 
+ void nvDPDestroyConnector(NVDPLibConnectorPtr pNVDpLibConnector);
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -1138,6 +1138,10 @@
+      * functions that use it.
+      */
+     NvBool              skipConsoleRestore       : 1;
++
++    /* Local resume diagnostics: bounded packet logging, protected by NVKMS. */
++    NvU32               resumeDiagDpPacketsRemaining;
++    NvU32               resumeDiagDpEventsRemaining;
+     /*
+      * Indicates that hotplug events that occur while NVKMS is the modeset owner
+      * should trigger console restore modesets.
+@@ -2556,6 +2560,16 @@
+ 
+ }
+ 
++/* Local stage-two diagnostics; callers hold the NVKMS serialization lock. */
++static inline NvBool nvResumeDiagTakeDpEvent(NVDevEvoPtr pDevEvo)
++{
++    if (pDevEvo->resumeDiagDpEventsRemaining == 0) {
++        return FALSE;
++    }
++    pDevEvo->resumeDiagDpEventsRemaining--;
++    return TRUE;
++}
++
+ static inline NvBool nvHeadIsActive(const NVDispEvoRec *pDispEvo,
+                                     const NvU32 head)
+ {
+--- a/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
++++ b/src/nvidia-modeset/kapi/src/nvkms-kapi-notifiers.c
+@@ -328,7 +328,11 @@
+                         &semParsed);
+ 
+     if (semParsed.payload != NVKMS_KAPI_SEMAPHORE_VALUE_DONE) {
+-        nvAssert(semParsed.payload == NVKMS_KAPI_SEMAPHORE_VALUE_NOT_READY);
++        /* A rejected, unsubmitted update can already have a signaled input
++         * fence. The caller must exclude future callback writes before
++         * returning either NOT_READY or READY to the reusable pool. */
++        nvAssert((semParsed.payload == NVKMS_KAPI_SEMAPHORE_VALUE_NOT_READY) ||
++                 (semParsed.payload == NVKMS_KAPI_SEMAPHORE_VALUE_READY));
+         ResetSemaphore(device, index, NVKMS_KAPI_SEMAPHORE_VALUE_DONE);
+     }
+ }
+--- a/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.cpp
+@@ -463,6 +463,15 @@
+ {
+     pConnectorEvo->detectComplete = TRUE;
+ 
++    if (nvResumeDiagTakeDpEvent(pConnectorEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP detect complete; connector=%s "
++                    "display=0x%x plugged=%u active=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pConnectorEvo->pDpLibConnector->plugged,
++                    pConnectorEvo->pDpLibConnector->isActive);
++    }
++
+     // XXX[DP MST] potentially use this call to notify NV-CONTROL of topology
+     // change;
+ 
+@@ -672,6 +681,16 @@
+         sinkIsAudioCapable = pDpLibDevice->device->isAudioSink();
+     }
+ 
++    if (nvResumeDiagTakeDpEvent(pDpyEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pDpyEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP link configuration; connector=%s "
++                    "display=0x%x plugged=%u lanes=%u rate_10mhz=%u",
++                    pDpyEvo->pConnectorEvo->name,
++                    nvDpyIdToNvU32(pDpyEvo->id),
++                    dev != NULL && pDpLibDevice->isPlugged, laneCount,
++                    (NvU32)linkRate10MHz);
++    }
++
+     // The DisplayPort library reports a disabled link as 0 lanes.  NV-CONTROL,
+     // for historical reasons, uses a setting of "1 lane @ disabled" for a
+     // disabled link, so translate to that.
+--- a/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.hpp
++++ b/src/nvidia-modeset/src/dp/nvdp-connector-event-sink.hpp
+@@ -85,6 +85,9 @@
+     // Connector::notifyLongPulse().
+     NvBool plugged;
+ 
++    // Mirrors DPLib's accepted client-forced connection state.
++    NvBool clientForcedConnected;
++
+     // Indicates whether the HDMI/DVI half of the connector is active
+     // If so link is being driven by HDMI/DVI and avoid LT etc on DP
+     // link of the connector
+--- a/src/nvidia-modeset/src/dp/nvdp-connector.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-connector.cpp
+@@ -111,6 +111,38 @@
+     }
+ 
+     pNVDpLibConnector->connector->setClientForcedConnected(enabled == TRUE);
++    pNVDpLibConnector->clientForcedConnected = (enabled == TRUE);
++}
++
++NvBool nvDPIsDpyActivationAllowed(
++    const NVDPLibConnectorRec *pDpLibConnector,
++    const NVDpyEvoRec *pDpyEvo)
++{
++    const NVConnectorEvoRec *pConnectorEvo = pDpLibConnector->pConnectorEvo;
++
++    nvAssert(pDpyEvo->pConnectorEvo == pConnectorEvo);
++
++    /* Internal panels have their own power/mux presence semantics. */
++    if (nvConnectorIsInternal(pConnectorEvo)) {
++        return TRUE;
++    }
++
++    /*
++     * Match dynamic-data detection: forced connections cannot manufacture an
++     * MST sink.  The upstream cable alone does not establish sink presence.
++     */
++    if (nvDpyEvoIsDPMST(pDpyEvo)) {
++        return pDpLibConnector->plugged &&
++               (pDpyEvo->dp.pDpLibDevice != NULL) &&
++               pDpyEvo->dp.pDpLibDevice->isPlugged;
++    }
++
++    /*
++     * SST permits deliberate headless/empty groups only when the client has
++     * forced connection.  Connected display overrides reach the same setter
++     * through nvDpyGetDynamicData(); cached EDID alone is not such intent.
++     */
++    return pDpLibConnector->plugged || pDpLibConnector->clientForcedConnected;
+ }
+ 
+ 
+@@ -120,6 +152,15 @@
+     NVDPLibConnectorPtr pNVDpLibConnector = pConnectorEvo->pDpLibConnector;
+     DisplayPort::Connector *c = pNVDpLibConnector->connector;
+ 
++    if (nvResumeDiagTakeDpEvent(pConnectorEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: HPD long pulse; connector=%s display=0x%x "
++                    "previous_plugged=%u plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pNVDpLibConnector->plugged, connected,
++                    pConnectorEvo->detectComplete);
++    }
++
+     pNVDpLibConnector->plugged = connected;
+ 
+     if (!pNVDpLibConnector->linkHandoffEnabled &&
+@@ -137,6 +178,15 @@
+ void nvDPNotifyShortPulse(NVDPLibConnectorPtr pNVDpLibConnector)
+ {
+     DisplayPort::Connector *c = pNVDpLibConnector->connector;
++    const NVConnectorEvoRec *pConnectorEvo = pNVDpLibConnector->pConnectorEvo;
++
++    if (nvResumeDiagTakeDpEvent(pConnectorEvo->pDispEvo->pDevEvo)) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: HPD short pulse; connector=%s display=0x%x "
++                    "plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pNVDpLibConnector->plugged, pConnectorEvo->detectComplete);
++    }
+ 
+     c->notifyShortPulse();
+ }
+@@ -853,6 +903,17 @@
+     const NvU32 newHeadMask =
+         nvConnectorGetAttachedHeadMaskEvo(pConnectorEvo);
+     DisplayPort::DpPreModesetParams preModesetParams = { };
++    const NvBool diagTrace = nvResumeDiagTakeDpEvent(pDispEvo->pDevEvo);
++
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP pre-modeset begin; connector=%s "
++                    "display=0x%x plugged=%u detect_complete=%u active=%u "
++                    "old_heads=0x%x new_heads=0x%x",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pDpLibConnector->plugged, pConnectorEvo->detectComplete,
++                    pDpLibConnector->isActive, oldHeadMask, newHeadMask);
++    }
+ 
+     for (NvU32 head = 0; head < pDispEvo->pDevEvo->numHeads; head++) {
+ 
+@@ -874,6 +935,13 @@
+     }
+ 
+     connector->dpPreModeset(preModesetParams);
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP pre-modeset returned; connector=%s "
++                    "display=0x%x plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    pDpLibConnector->plugged, pConnectorEvo->detectComplete);
++    }
+ }
+ 
+ /*
+@@ -1033,6 +1101,18 @@
+     bool dpyIdIsDynamic = false;
+     /* By default allow MST */
+     bool allowMST = true;
++    const NvBool diagTrace = nvResumeDiagTakeDpEvent(pDispEvo->pDevEvo);
++
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP resume begin; connector=%s display=0x%x "
++                    "detected_plugged=%u previous_plugged=%u active=%u "
++                    "detect_complete=%u firmware_head=0x%x",
++                    pConnectorEvo->name, nvDpyIdToNvU32(pConnectorEvo->displayId),
++                    plugged, pNVDpLibConnector->plugged,
++                    pNVDpLibConnector->isActive, pConnectorEvo->detectComplete,
++                    firmwareHead);
++    }
+ 
+     pNVDpLibConnector->linkHandoffEnabled =
+                             IsDDCPartnerActive(pNVDpLibConnector);
+@@ -1065,17 +1145,38 @@
+ 
+     pNVDpLibConnector->plugged = plugged;
+     if (plugged && !pNVDpLibConnector->headInFirmware) {
++        if (diagTrace) {
++            nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                        "RESUME-DIAG2: DP SOR assignment begin; connector=%s",
++                        pConnectorEvo->name);
++        }
+         NvBool ret = nvAssignSOREvo(pConnectorEvo,
+                                     nvDpyIdToNvU32(pConnectorEvo->displayId),
+                                     FALSE /* b2Heads1Or */,
+                                     0 /* sorExcludeMask */);
+ 
++        if (diagTrace) {
++            nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                        "RESUME-DIAG2: DP SOR assignment returned; "
++                        "connector=%s success=%u", pConnectorEvo->name, ret);
++        }
+         nvAssert(ret);
+         if (!ret) {
+             // DP lib skips LT for unassigned SOR.
+         }
+     }
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP library resume begin; connector=%s "
++                    "handoff=%u head_in_firmware=%u allow_mst=%u",
++                    pConnectorEvo->name, pNVDpLibConnector->linkHandoffEnabled,
++                    pNVDpLibConnector->headInFirmware, allowMST);
++    }
++
++    /* Connector::resume() resets its client-forced connection state. */
++    pNVDpLibConnector->clientForcedConnected = FALSE;
++
+     c->resume(pNVDpLibConnector->linkHandoffEnabled,
+               pNVDpLibConnector->headInFirmware,
+               plugged,
+@@ -1085,6 +1186,14 @@
+               true /* bDisableVbiosScratchRegisterUpdate, bug 200471345 */,
+               allowMST);
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP library resume returned; connector=%s "
++                    "plugged=%u detect_complete=%u",
++                    pConnectorEvo->name, pNVDpLibConnector->plugged,
++                    pConnectorEvo->detectComplete);
++    }
++
+     for (NvU32 head = 0; head < ARRAY_LEN(pNVDpLibConnector->pGroup); head++) {
+         pNVDpLibConnector->pGroup[head] =
+             pNVDpLibConnector->connector->newGroup();
+@@ -1098,9 +1207,19 @@
+     }
+ 
+     pNVDpLibConnector->isActive = true;
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP resume end; connector=%s success=1",
++                    pConnectorEvo->name);
++    }
+     return TRUE;
+ 
+ failed:
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_ERROR,
++                    "RESUME-DIAG2: DP resume end; connector=%s success=0",
++                    pConnectorEvo->name);
++    }
+     pNVDpLibConnector->connector->pause();
+     return FALSE;
+ }
+--- a/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
++++ b/src/nvidia-modeset/src/dp/nvdp-evo-interface.cpp
+@@ -29,6 +29,8 @@
+ 
+ #include "nvkms-rmapi.h"
+ 
++#include "ctrl/ctrl0073/ctrl0073dp.h"
++
+ #include "nvdp-connector-event-sink.hpp"
+ 
+ namespace nvkmsDisplayPort {
+@@ -42,12 +44,43 @@
+                                   NvU32 paramSize)
+ {
+     NVDevEvoPtr pDevEvo = pConnectorEvo->pDispEvo->pDevEvo;
++    NV0073_CTRL_DP_CTRL_PARAMS *pCtrl =
++        (command == NV0073_CTRL_CMD_DP_CTRL && params != NULL &&
++         paramSize == sizeof(NV0073_CTRL_DP_CTRL_PARAMS)) ?
++        static_cast<NV0073_CTRL_DP_CTRL_PARAMS *>(params) : NULL;
++    const NvBool diagTrace = pCtrl != NULL && nvResumeDiagTakeDpEvent(pDevEvo);
++    NvU64 diagStartTime = 0;
++
++    if (diagTrace) {
++        diagStartTime = nvkms_get_usec();
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP control begin; connector=%s "
++                    "display=0x%x cmd=0x%x data=0x%x lanes=%u bw_code=0x%x",
++                    pConnectorEvo->name, pCtrl->displayId, pCtrl->cmd,
++                    pCtrl->data,
++                    DRF_VAL(0073_CTRL, _DP_DATA, _SET_LANE_COUNT, pCtrl->data),
++                    DRF_VAL(0073_CTRL, _DP_DATA, _SET_LINK_BW, pCtrl->data));
++    }
+ 
+-    return nvRmApiControl(nvEvoGlobal.clientHandle,
++    const NvU32 ret = nvRmApiControl(nvEvoGlobal.clientHandle,
+                           pDevEvo->displayCommonHandle,
+                           command,
+                           params,
+                           paramSize);
++
++    if (diagTrace) {
++        nvEvoLogDisp(pConnectorEvo->pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: DP control end; connector=%s display=0x%x "
++                    "status=0x%x err=0x%x retry_ms=%u clock_recovery_error=%u "
++                    "equalization_error=%u disconnected=%u elapsed_ms=%u",
++                    pConnectorEvo->name, pCtrl->displayId, ret, pCtrl->err,
++                    pCtrl->retryTimeMs,
++                    DRF_VAL(0073_CTRL_DP, _ERR, _CLOCK_RECOVERY, pCtrl->err),
++                    DRF_VAL(0073_CTRL_DP, _ERR, _CHANNEL_EQUALIZATION, pCtrl->err),
++                    DRF_VAL(0073_CTRL_DP, _ERR, _LINK_STATUS, pCtrl->err),
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++    return ret;
+ }
+ 
+ NvU32 EvoInterface::rmControl5070(NvU32 command, void * params,
+--- a/src/nvidia-modeset/src/nvkms-dma.c
++++ b/src/nvidia-modeset/src/nvkms-dma.c
+@@ -198,6 +198,7 @@
+     NVDmaBufferEvoPtr p = &pDevEvo->core->pb;
+     volatile NvU32 *pNotifier = pDevEvo->core->notifierDma.cpuAddress;
+     NvU64 startTime = 0;
++    NvU64 diagLastLogTime = 0;
+ 
+     nvAssert(pNotifier != NULL);
+     pNotifier += offset;
+@@ -209,6 +210,12 @@
+         const NvU32 done_val = done_value << done_base_bit;
+ 
+         if ((val & done_mask) == done_val) {
++            if (diagLastLogTime != 0) {
++                nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG: notifier completed; offset=%u elapsed_ms=%u",
++                    offset,
++                    (NvU32)((nvkms_get_usec() - startTime) / 1000));
++            }
+             return TRUE;
+         }
+ 
+@@ -219,14 +226,36 @@
+         if (nvExceedsTimeoutUSec(
+                 pDevEvo,
+                 &startTime,
+-                NV_EVO_NOTIFIER_SHORT_TIMEOUT_USEC) &&
+-            (p->put_offset == EvoCoreReadGet(p)))
++                NV_EVO_NOTIFIER_SHORT_TIMEOUT_USEC))
+         {
+-            nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
+-                         "Lost display notification (%d:0x%08x); "
+-                         "continuing.", sd, val);
+-            EvoWriteNotifier(pNotifier, done_value << done_base_bit);
+-            return TRUE;
++            const NvU32 getOffset = EvoCoreReadGet(p);
++            const NvU64 now = nvkms_get_usec();
++
++            /* Do not change the wait or its existing synthetic-completion path. */
++            if (diagLastLogTime == 0 ||
++                (now - diagLastLogTime) >= 30000000) {
++                nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
++                    "RESUME-DIAG: notifier wait; offset=%u value=0x%08x "
++                    "mask=0x%08x expected=0x%08x get=0x%x put=0x%x "
++                    "active_heads=0x%x elapsed_ms=%u",
++                    offset, val, done_mask, done_val, getOffset, p->put_offset,
++                    nvGetActiveHeadMask(pDispEvo),
++                    (NvU32)((now - startTime) / 1000));
++                diagLastLogTime = now;
++            }
++
++            if (p->put_offset == getOffset) {
++                nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
++                             "Lost display notification (%d:0x%08x); "
++                             "continuing.", sd, val);
++                nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
++                    "RESUME-DIAG: synthesizing notifier completion; "
++                    "offset=%u get=0x%x put=0x%x elapsed_ms=%u",
++                    offset, getOffset, p->put_offset,
++                    (NvU32)((now - startTime) / 1000));
++                EvoWriteNotifier(pNotifier, done_value << done_base_bit);
++                return TRUE;
++            }
+         }
+ 
+         nvkms_yield();
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -427,6 +427,9 @@
+     NvBool releaseElv)
+ {
+     NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
++    const NvBool diagTrace = sync && pDevEvo->core != NULL &&
++        nvResumeDiagTakeDpEvent(pDevEvo);
++    NvU64 diagStartTime = 0;
+ 
+     // Calling code should reject operations that send updates while the console
+     // is active.
+@@ -440,15 +443,41 @@
+         pDevEvo->hal->InitCompNotifier(pDispEvo, notifier);
+     }
+ 
++    if (diagTrace) {
++        diagStartTime = nvkms_get_usec();
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: core update begin; notifier=%d notify=%u "
++                    "sync=%u active_heads=0x%x put=0x%x",
++                    notifier, notify, sync, nvGetActiveHeadMask(pDispEvo),
++                    pDevEvo->core->pb.put_offset);
++    }
++
+     pDevEvo->hal->SetNotifier(pDevEvo, notify, sync, notifier,
+                               updateState);
+     pDevEvo->hal->Update(pDevEvo, updateState, releaseElv);
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: core update returned; notifier=%d "
++                    "put=0x%x elapsed_ms=%u; entering notifier wait",
++                    notifier, pDevEvo->core->pb.put_offset,
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++
+     // Wait for completion.
+     if (sync) {
+         pDevEvo->hal->WaitForCompNotifier(pDispEvo, notifier);
+     }
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: core wait returned; notifier=%d "
++                    "active_heads=0x%x put=0x%x elapsed_ms=%u",
++                    notifier, nvGetActiveHeadMask(pDispEvo),
++                    pDevEvo->core->pb.put_offset,
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++
+     if (notify) {
+         const NVDispEvoRec *pDispEvoTmp;
+         NVEvoUpdateState coreUpdateState = { };
+@@ -5498,6 +5527,14 @@
+     NVDispEvoRec *pDispEvo;
+     NvU32 dispIndex;
+ 
++    pDevEvo->resumeDiagDpPacketsRemaining = 8;
++    pDevEvo->resumeDiagDpEventsRemaining = 64;
++    nvEvoLogDev(pDevEvo, EVO_LOG_INFO,
++                "RESUME-DIAG2: stage-two tracing enabled; event_budget=64");
++    nvEvoLogDev(pDevEvo, EVO_LOG_INFO,
++                "RESUME-DIAG: device resume begin; dispClass=0x%x",
++                pDevEvo->dispClass);
++
+     if (NV0073_CTRL_SYSTEM_GET_CAP(pDevEvo->commonCapsBits,
+                 NV0073_CTRL_SYSTEM_CAPS_CROSS_BAR_SUPPORTED)) {
+         FOR_ALL_EVO_DISPLAYS(pDispEvo, dispIndex, pDevEvo) {
+@@ -5509,6 +5546,8 @@
+ 
+     if (!nvAllocCoreChannelEvo(pDevEvo)) {
+         // free the device if core channel allocation fails
++        nvEvoLogDev(pDevEvo, EVO_LOG_ERROR,
++                    "RESUME-DIAG: core channel allocation failed");
+         nvRevokeDevice(pDevEvo);
+         return FALSE;
+     }
+@@ -5547,6 +5586,9 @@
+ 
+     AllocDIFRState(pDevEvo);
+ 
++    nvEvoLogDev(pDevEvo, EVO_LOG_INFO,
++                "RESUME-DIAG: device resume complete; awaiting display restore");
++
+     return TRUE;
+ }
+ 
+@@ -9888,4 +9930,3 @@
+ 
+     return FALSE;
+ }
+-
+--- a/src/nvidia-modeset/src/nvkms-evo1.c
++++ b/src/nvidia-modeset/src/nvkms-evo1.c
+@@ -339,6 +339,8 @@
+     NV0073_CTRL_SPECIFIC_SET_OD_PACKET_PARAMS params = {
+         .displayId = pHeadState->activeRmId,
+     };
++    NvBool diagTrace;
++    NvU64 diagStartTime = 0;
+ 
+     if (sdp->hb.hb1 == NVT_DP_ADAPTIVE_SYNC_SDP_PACKET_TYPE) {
+         nvAssert(transmitCtrl->frequency == NV_EVO_INFOFRAME_TRANSMIT_FREQUENCY_EVERY_FRAME);
+@@ -384,12 +386,40 @@
+         sizeof(params.aPacket));
+     nvkms_memcpy(params.aPacket, &sdp->hb, params.packetSize);
+ 
++    diagTrace = pDevEvo->resumeDiagDpPacketsRemaining != 0;
++    if (diagTrace) {
++        pDevEvo->resumeDiagDpPacketsRemaining--;
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++            "RESUME-DIAG: DP packet begin; head=%u display=0x%x "
++            "type=0x%02x hdr_state=%u active=%u active_heads=0x%x "
++            "control=0x%x size=%u remaining=%u",
++            head, params.displayId, sdp->hb.hb1, pHeadState->hdrInfoFrame.state,
++            nvHeadIsActive(pDispEvo, head), nvGetActiveHeadMask(pDispEvo),
++            params.transmitControl, params.packetSize,
++            pDevEvo->resumeDiagDpPacketsRemaining);
++        diagStartTime = nvkms_get_usec();
++    }
++
+     ret = nvRmApiControl(nvEvoGlobal.clientHandle,
+                          pDevEvo->displayCommonHandle,
+                          NV0073_CTRL_CMD_SPECIFIC_SET_OD_PACKET,
+                          &params,
+                          sizeof(params));
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo,
++            ret == NVOS_STATUS_SUCCESS ? EVO_LOG_INFO : EVO_LOG_ERROR,
++            "RESUME-DIAG: DP packet end; head=%u display=0x%x "
++            "type=0x%02x status=0x%x elapsed_ms=%u",
++            head, params.displayId, sdp->hb.hb1, ret,
++            (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    } else if (ret != NVOS_STATUS_SUCCESS) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_ERROR,
++            "RESUME-DIAG: DP packet failed outside trace budget; "
++            "head=%u display=0x%x type=0x%02x status=0x%x",
++            head, params.displayId, sdp->hb.hb1, ret);
++    }
++
+     if (ret != NVOS_STATUS_SUCCESS) {
+         nvAssert(!"NV0073_CTRL_CMD_SPECIFIC_SET_OD_PACKET failed");
+     }
+--- a/src/nvidia-modeset/src/nvkms-modeset.c
++++ b/src/nvidia-modeset/src/nvkms-modeset.c
+@@ -4090,6 +4090,62 @@
+     return TRUE;
+ }
+ 
++/*
++ * Presence is a proposed-configuration requirement, including test-only
++ * SET_MODE requests.  Standalone mode feasibility queries do not come here.
++ * Check every proposed active sink (including clones and bandwidth overrides)
++ * before validation can create headless DPLib groups for a stale configuration.
++ * Empty dpy lists naturally permit detach and all-heads-off requests.
++ */
++static NvBool ValidateProposedDpActivation(
++    NVDevEvoPtr pDevEvo,
++    const NVProposedModeSetHwState *pProposed,
++    struct NvKmsSetModeReply *pReply)
++{
++    NVDispEvoPtr pDispEvo;
++    NvU32 dispIndex;
++
++    FOR_ALL_EVO_DISPLAYS(pDispEvo, dispIndex, pDevEvo) {
++        for (NvU32 apiHead = 0; apiHead < pDevEvo->numApiHeads; apiHead++) {
++            const NVProposedModeSetStateOneApiHead *pProposedApiHead =
++                &pProposed->disp[dispIndex].apiHead[apiHead];
++            const NVDpyEvoRec *pDpyEvo;
++
++            /* Configured outputs without a hardware head are not activated. */
++            if (pProposedApiHead->hwHeadsMask == 0x0) {
++                continue;
++            }
++
++            FOR_ALL_EVO_DPYS(pDpyEvo, pProposedApiHead->dpyIdList, pDispEvo) {
++                const NVConnectorEvoRec *pConnectorEvo = pDpyEvo->pConnectorEvo;
++
++                if (!nvConnectorUsesDPLib(pConnectorEvo) ||
++                    nvDPIsDpyActivationAllowed(pConnectorEvo->pDpLibConnector,
++                                               pDpyEvo)) {
++                    continue;
++                }
++
++                pReply->disp[dispIndex].status =
++                    NVKMS_SET_MODE_ONE_DISP_STATUS_INCOMPATIBLE_DPYS;
++                pReply->disp[dispIndex].head[apiHead].status =
++                    NVKMS_SET_MODE_ONE_HEAD_STATUS_INVALID_DPY;
++                nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                            "DP activation refused: absent external sink; "
++                            "connector=%s display=0x%x dpy=0x%x api_head=%u "
++                            "hw_heads=0x%x mst=%u",
++                            pConnectorEvo->name,
++                            nvDpyIdToNvU32(pConnectorEvo->displayId),
++                            nvDpyIdToNvU32(pDpyEvo->id), apiHead,
++                            pProposedApiHead->hwHeadsMask,
++                            nvDpyEvoIsDPMST(pDpyEvo));
++                return FALSE;
++            }
++        }
++    }
++
++    return TRUE;
++}
++
+ /*!
+  * Helper function to assign and validate the proposed mode
+  */
+@@ -4148,6 +4204,22 @@
+             goto done;
+         }
+ 
++        /*
++         * Validate presence for test-only SET_MODE as well as commit, so an
++         * atomic check cannot accept an already absent sink.  Do not retry
++         * headSurface downgrades: they cannot restore sink presence.
++         * Returning here also emits just one refusal log per modeset request.
++         */
++        if (!ValidateProposedDpActivation(pDevEvo, pProposed, pReply)) {
++            ClearProposedModeSetHwState(pDevEvo, pProposed, FALSE);
++            nvHsConfigClearPatchedSetModeRequest(pDevEvo,
++                                                 pOpenDev,
++                                                 pPatchedRequest,
++                                                 patchedApiHeadsMask);
++            nvHsConfigFreeResources(pDevEvo, &pWorkArea->hsConfig);
++            goto done;
++        }
++
+         /* validate pProposed */
+         if (!ValidateProposedModeSetHwState(pDevEvo, pProposed, pReply,
+                                             pWorkArea)) {
+--- a/src/nvidia-modeset/src/nvkms-rm.c
++++ b/src/nvidia-modeset/src/nvkms-rm.c
+@@ -2600,11 +2600,21 @@
+     NV0073_CTRL_SYSTEM_GET_CONNECT_STATE_PARAMS params = { 0 };
+     NVDevEvoPtr pDevEvo = pDispEvo->pDevEvo;
+     NvU32 ret;
++    NvBool diagTrace;
++    NvU64 diagStartTime = 0;
+ 
+     if (pDevEvo->displaylessHw) {
+         return DisplaylessRmGetConnectedDpys(pDispEvo, dpyIdList);
+     }
+ 
++    diagTrace = nvResumeDiagTakeDpEvent(pDevEvo);
++    if (diagTrace) {
++        diagStartTime = nvkms_get_usec();
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: connect-state query begin; requested=0x%x",
++                    nvDpyIdListToNvU32(dpyIdList));
++    }
++
+     params.displayMask = nvDpyIdListToNvU32(dpyIdList);
+     params.flags =
+         (DRF_DEF(0073_CTRL_SYSTEM,_GET_CONNECT_STATE_FLAGS,_METHOD,_DEFAULT) |
+@@ -2634,6 +2644,14 @@
+         }
+     } while(params.retryTimeMs > 0);
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG2: connect-state query end; requested=0x%x "
++                    "returned=0x%x status=0x%x elapsed_ms=%u",
++                    nvDpyIdListToNvU32(dpyIdList), params.displayMask, ret,
++                    (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    }
++
+     if (ret == NVOS_STATUS_SUCCESS) {
+         return nvNvU32ToDpyIdList(params.displayMask);
+     } else {

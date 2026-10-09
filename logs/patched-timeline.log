@@ -1,0 +1,11 @@
+2026-10-09T09:14:21+02:00 eve kernel: PM: suspend entry (deep)
+2026-10-09T09:14:34+02:00 eve kernel: nvidia-modeset: GPU:0: DP activation refused: absent external sink; connector=DP-4 display=0x2000 dpy=0x2000 api_head=0 hw_heads=0x8 mst=0
+2026-10-09T09:14:34+02:00 eve kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] RESUME-FIX: scheduling connector reprobe and hotplug
+2026-10-09T09:14:34+02:00 eve kernel: PM: suspend exit
+2026-10-09T09:15:04+02:00 eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: HPD long pulse; connector=DP-4 display=0x2000 previous_plugged=0 plugged=1 detect_complete=1
+2026-10-09T09:16:29+02:00 eve kernel: PM: suspend entry (deep)
+2026-10-09T09:16:46+02:00 eve kernel: nvidia-modeset: GPU:0: DP activation refused: absent external sink; connector=DP-4 display=0x2000 dpy=0x2000 api_head=0 hw_heads=0x8 mst=0
+2026-10-09T09:16:46+02:00 eve kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] RESUME-FIX: scheduling connector reprobe and hotplug
+2026-10-09T09:16:46+02:00 eve kernel: PM: suspend exit
+2026-10-09T09:17:09+02:00 eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: HPD long pulse; connector=DP-4 display=0x2000 previous_plugged=0 plugged=1 detect_complete=1
+2026-10-09T09:25:36+02:00 eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: HPD long pulse; connector=DP-4 display=0x2000 previous_plugged=1 plugged=0 detect_complete=1

@@ -1,0 +1,5 @@
+PASS signal before cancel, READY cancellation, references
+PASS cancel before signal, reused slot, stale device pointer
+PASS success preserves callback GPU behavior
+PASS actual registration-error block and cancellation of prior reservations
+PASS empty/repeated decision cleanup

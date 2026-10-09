@@ -1,0 +1,140 @@
+[  134.372041] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: stage-two tracing enabled; event_budget=64
+[  134.372106] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: device resume begin; dispClass=0xc570
+[  134.402048] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0xff00
+[  134.410038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0xff00 returned=0x2000 status=0x0 elapsed_ms=7
+[  134.410057] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=DP-0 display=0x100 detected_plugged=0 previous_plugged=0 active=0 detect_complete=1 firmware_head=0xffffffff
+[  134.410066] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=DP-0 handoff=0 head_in_firmware=0 allow_mst=1
+[  134.411038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=DP-0 display=0x100 plugged=0 active=0
+[  134.411056] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=DP-0 plugged=0 detect_complete=1
+[  134.411065] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=DP-0 success=1
+[  134.411073] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=DP-2 display=0x800 detected_plugged=0 previous_plugged=0 active=0 detect_complete=1 firmware_head=0xffffffff
+[  134.411081] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=DP-2 handoff=0 head_in_firmware=0 allow_mst=1
+[  134.411089] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=DP-2 display=0x800 plugged=0 active=0
+[  134.411096] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=DP-2 plugged=0 detect_complete=1
+[  134.411104] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=DP-2 success=1
+[  134.411111] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=DP-4 display=0x2000 detected_plugged=1 previous_plugged=1 active=0 detect_complete=1 firmware_head=0xffffffff
+[  134.411119] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP SOR assignment begin; connector=DP-4
+[  134.411126] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP SOR assignment returned; connector=DP-4 success=1
+[  134.411134] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=DP-4 handoff=0 head_in_firmware=0 allow_mst=1
+[  134.440038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control begin; connector=DP-4 display=0x2000 cmd=0x2083 data=0x1e04 lanes=4 bw_code=0x1e
+[  134.454038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control end; connector=DP-4 display=0x2000 status=0x0 err=0x0 retry_ms=0 clock_recovery_error=0 equalization_error=0 disconnected=0 elapsed_ms=13
+[  134.454056] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control begin; connector=DP-4 display=0x2000 cmd=0x2883 data=0x600 lanes=0 bw_code=0x6
+[  134.455040] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control end; connector=DP-4 display=0x2000 status=0x0 err=0x0 retry_ms=0 clock_recovery_error=0 equalization_error=0 disconnected=0 elapsed_ms=1
+[  134.455058] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=DP-4 plugged=1 detect_complete=0
+[  134.455068] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=DP-4 success=1
+[  134.455076] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=USB-C-0 display=0x8000 detected_plugged=0 previous_plugged=0 active=0 detect_complete=1 firmware_head=0xffffffff
+[  134.455084] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=USB-C-0 handoff=0 head_in_firmware=0 allow_mst=1
+[  134.456038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=USB-C-0 display=0x8000 plugged=0 active=0
+[  134.456055] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=USB-C-0 plugged=0 detect_complete=1
+[  134.456065] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=USB-C-0 success=1
+[  134.459038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update begin; notifier=0 notify=1 sync=1 active_heads=0x0 put=0x0
+[  134.459055] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update returned; notifier=0 put=0x210 elapsed_ms=0; entering notifier wait
+[  134.464038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core wait returned; notifier=0 active_heads=0x0 put=0x210 elapsed_ms=4
+[  134.467040] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: device resume complete; awaiting display restore
+[  134.467058] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=DP-4 display=0x2000 plugged=1 active=1
+[  134.467067] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-4 display=0x2000 plugged=1 lanes=0 rate_10mhz=162
+[  134.468007] eve kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] RESUME-DIAG: framebuffer console restore begin (helper=present)
+[  134.478042] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset begin; connector=DP-4 display=0x2000 plugged=1 detect_complete=1 active=1 old_heads=0x0 new_heads=0x8
+[  134.478061] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control begin; connector=DP-4 display=0x2000 cmd=0x2083 data=0x1e04 lanes=4 bw_code=0x1e
+[  134.492011] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control end; connector=DP-4 display=0x2000 status=0x0 err=0x0 retry_ms=0 clock_recovery_error=0 equalization_error=0 disconnected=0 elapsed_ms=13
+[  134.493035] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset returned; connector=DP-4 display=0x2000 plugged=1 detect_complete=1
+[  134.493053] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update begin; notifier=0 notify=1 sync=1 active_heads=0x8 put=0x0
+[  134.493062] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update returned; notifier=0 put=0x688 elapsed_ms=0; entering notifier wait
+[  134.505037] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core wait returned; notifier=0 active_heads=0x8 put=0x688 elapsed_ms=12
+[  134.507036] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-4 display=0x2000 plugged=1 lanes=4 rate_10mhz=810
+[  134.507054] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet begin; head=3 display=0x2000 type=0x87 hdr_state=1 active=1 active_heads=0x8 control=0x105 size=32 remaining=7
+[  134.507064] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet end; head=3 display=0x2000 type=0x87 status=0x0 elapsed_ms=0
+[  134.507072] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet begin; head=3 display=0x2000 type=0x07 hdr_state=1 active=1 active_heads=0x8 control=0x1 size=23 remaining=6
+[  134.507079] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet end; head=3 display=0x2000 type=0x07 status=0x0 elapsed_ms=0
+[  134.509005] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: HPD short pulse; connector=DP-4 display=0x2000 plugged=1 detect_complete=1
+[  134.511050] eve kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] RESUME-DIAG: framebuffer console restore complete
+[  145.881013] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-0 display=0x100 plugged=0 lanes=1 rate_10mhz=0
+[  145.881085] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0x200
+[  145.882069] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0x200 returned=0x0 status=0x0 elapsed_ms=1
+[  145.882104] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0x400
+[  145.882113] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0x400 returned=0x0 status=0x0 elapsed_ms=0
+[  145.882121] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-2 display=0x800 plugged=0 lanes=1 rate_10mhz=0
+[  145.882129] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0x1000
+[  145.883075] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0x1000 returned=0x0 status=0x0 elapsed_ms=0
+[  145.884064] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet begin; head=3 display=0x2000 type=0x87 hdr_state=1 active=1 active_heads=0x8 control=0x105 size=32 remaining=5
+[  145.884097] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet end; head=3 display=0x2000 type=0x87 status=0x0 elapsed_ms=0
+[  145.884106] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet begin; head=3 display=0x2000 type=0x07 hdr_state=1 active=1 active_heads=0x8 control=0x1 size=23 remaining=4
+[  145.885076] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet end; head=3 display=0x2000 type=0x07 status=0x0 elapsed_ms=0
+[  145.886094] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-4 display=0x2000 plugged=1 lanes=4 rate_10mhz=810
+[  145.956038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=USB-C-0 display=0x8000 plugged=0 lanes=1 rate_10mhz=0
+[  179.225041] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset begin; connector=DP-4 display=0x2000 plugged=1 detect_complete=1 active=1 old_heads=0x8 new_heads=0x0
+[  179.225081] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset returned; connector=DP-4 display=0x2000 plugged=1 detect_complete=1
+[  179.225091] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update begin; notifier=0 notify=1 sync=1 active_heads=0x0 put=0x698
+[  179.225099] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update returned; notifier=0 put=0x778 elapsed_ms=0; entering notifier wait
+[  179.247036] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core wait returned; notifier=0 active_heads=0x0 put=0x778 elapsed_ms=22
+[  179.252037] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control begin; connector=DP-4 display=0x2000 cmd=0x2083 data=0x600 lanes=0 bw_code=0x6
+[  179.253036] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP control end; connector=DP-4 display=0x2000 status=0x0 err=0x0 retry_ms=0 clock_recovery_error=0 equalization_error=0 disconnected=0 elapsed_ms=0
+[  179.256037] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-4 display=0x2000 plugged=1 lanes=0 rate_10mhz=270
+[  179.257036] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update begin; notifier=0 notify=1 sync=1 active_heads=0x0 put=0x788
+[  179.257054] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update returned; notifier=0 put=0x7b0 elapsed_ms=0; entering notifier wait
+[  179.257063] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core wait returned; notifier=0 active_heads=0x0 put=0x7b0 elapsed_ms=0
+[  181.247083] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: stage-two tracing enabled; event_budget=64
+[  181.247208] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: device resume begin; dispClass=0xc570
+[  181.277043] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0xff00
+[  181.282038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0xff00 returned=0x0 status=0x0 elapsed_ms=4
+[  181.282057] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=DP-0 display=0x100 detected_plugged=0 previous_plugged=0 active=0 detect_complete=1 firmware_head=0xffffffff
+[  181.282067] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=DP-0 handoff=0 head_in_firmware=0 allow_mst=1
+[  181.282075] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=DP-0 display=0x100 plugged=0 active=0
+[  181.282082] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=DP-0 plugged=0 detect_complete=1
+[  181.282090] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=DP-0 success=1
+[  181.282097] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=DP-2 display=0x800 detected_plugged=0 previous_plugged=0 active=0 detect_complete=1 firmware_head=0xffffffff
+[  181.282105] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=DP-2 handoff=0 head_in_firmware=0 allow_mst=1
+[  181.282113] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=DP-2 display=0x800 plugged=0 active=0
+[  181.282120] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=DP-2 plugged=0 detect_complete=1
+[  181.282128] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=DP-2 success=1
+[  181.282135] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=DP-4 display=0x2000 detected_plugged=0 previous_plugged=1 active=0 detect_complete=1 firmware_head=0xffffffff
+[  181.282143] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=DP-4 handoff=0 head_in_firmware=0 allow_mst=1
+[  181.282150] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=DP-4 display=0x2000 plugged=0 active=0
+[  181.282158] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=DP-4 plugged=0 detect_complete=1
+[  181.282166] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=DP-4 success=1
+[  181.282173] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume begin; connector=USB-C-0 display=0x8000 detected_plugged=0 previous_plugged=0 active=0 detect_complete=1 firmware_head=0xffffffff
+[  181.282181] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume begin; connector=USB-C-0 handoff=0 head_in_firmware=0 allow_mst=1
+[  181.283045] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP detect complete; connector=USB-C-0 display=0x8000 plugged=0 active=0
+[  181.283063] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP library resume returned; connector=USB-C-0 plugged=0 detect_complete=1
+[  181.283072] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP resume end; connector=USB-C-0 success=1
+[  181.286037] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update begin; notifier=0 notify=1 sync=1 active_heads=0x0 put=0x0
+[  181.286055] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update returned; notifier=0 put=0x210 elapsed_ms=0; entering notifier wait
+[  181.291038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core wait returned; notifier=0 active_heads=0x0 put=0x210 elapsed_ms=4
+[  181.293038] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: device resume complete; awaiting display restore
+[  181.294034] eve kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] RESUME-DIAG: framebuffer console restore begin (helper=present)
+[  181.304057] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset begin; connector=DP-4 display=0x2000 plugged=0 detect_complete=1 active=1 old_heads=0x0 new_heads=0x8
+[  181.304088] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset returned; connector=DP-4 display=0x2000 plugged=0 detect_complete=1
+[  181.304098] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update begin; notifier=0 notify=1 sync=1 active_heads=0x8 put=0x0
+[  181.304106] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update returned; notifier=0 put=0x688 elapsed_ms=0; entering notifier wait
+[  184.304038] eve kernel: nvidia-modeset: WARNING: GPU:0: RESUME-DIAG: notifier wait; offset=0 value=0x00000000 mask=0xc0000000 expected=0x80000000 get=0x688 put=0x688 active_heads=0x8 elapsed_ms=3000
+[  184.304068] eve kernel: nvidia-modeset: WARNING: GPU:0: RESUME-DIAG: synthesizing notifier completion; offset=0 get=0x688 put=0x688 elapsed_ms=3000
+[  184.304076] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core wait returned; notifier=0 active_heads=0x8 put=0x688 elapsed_ms=3000
+[  184.304083] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-4 display=0x2000 plugged=0 lanes=1 rate_10mhz=0
+[  184.304091] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet begin; head=3 display=0x2000 type=0x87 hdr_state=1 active=1 active_heads=0x8 control=0x105 size=32 remaining=7
+[  193.150572] eve kernel: NVRM: Xid (PCI:0000:01:00): 119, pid=1601, name=systemd-sleep, Timeout after 6s of waiting for RPC response from GPU0 GSP! Expected function 76 (GSP_RM_CONTROL) sequence 1842 (0x730288 0x3c).
+[  193.152308] eve kernel: nvidia-modeset: ERROR: GPU:0: RESUME-DIAG: DP packet end; head=3 display=0x2000 type=0x87 status=0x65 elapsed_ms=6272
+[  193.152316] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG: DP packet begin; head=3 display=0x2000 type=0x07 hdr_state=1 active=1 active_heads=0x8 control=0x1 size=23 remaining=6
+[  196.578039] eve kernel: NVRM: Xid (PCI:0000:01:00): 119, pid=1601, name=systemd-sleep, Timeout after 6s of waiting for RPC response from GPU0 GSP! Expected function 76 (GSP_RM_CONTROL) sequence 1843 (0x730288 0x3c).
+[  196.578069] eve kernel: nvidia-modeset: ERROR: GPU:0: RESUME-DIAG: DP packet end; head=3 display=0x2000 type=0x07 status=0x65 elapsed_ms=6000
+[  202.582738] eve kernel: NVRM: Xid (PCI:0000:01:00): 119, pid=1601, name=systemd-sleep, Timeout after 6s of waiting for RPC response from GPU0 GSP! Expected function 76 (GSP_RM_CONTROL) sequence 1844 (0x731150 0xc).
+[  202.861143] eve kernel: NVRM: Xid (PCI:0000:01:00): 154, GPU recovery action changed from 0x0 (None) to 0x1 (PF FLR)
+[  202.867039] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-0 display=0x100 plugged=0 lanes=1 rate_10mhz=0
+[  202.867061] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0x200
+[  202.867070] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0x200 returned=0x200 status=0x62 elapsed_ms=0
+[  202.867086] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0x400
+[  202.867094] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0x400 returned=0x400 status=0x62 elapsed_ms=0
+[  202.867109] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-2 display=0x800 plugged=0 lanes=1 rate_10mhz=0
+[  202.867117] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0x1000
+[  202.867125] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0x1000 returned=0x1000 status=0x62 elapsed_ms=0
+[  202.867148] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=DP-4 display=0x2000 plugged=0 lanes=1 rate_10mhz=0
+[  202.867156] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query begin; requested=0x4000
+[  202.867164] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: connect-state query end; requested=0x4000 returned=0x4000 status=0x62 elapsed_ms=0
+[  202.867179] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP link configuration; connector=USB-C-0 display=0x8000 plugged=0 lanes=1 rate_10mhz=0
+[  202.867226] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset begin; connector=DP-4 display=0x2000 plugged=0 detect_complete=1 active=1 old_heads=0x8 new_heads=0x0
+[  202.867234] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: DP pre-modeset returned; connector=DP-4 display=0x2000 plugged=0 detect_complete=1
+[  202.867242] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update begin; notifier=0 notify=1 sync=1 active_heads=0x0 put=0x698
+[  202.867250] eve kernel: nvidia-modeset: GPU:0: RESUME-DIAG2: core update returned; notifier=0 put=0x778 elapsed_ms=0; entering notifier wait
+[  202.868035] eve kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] RESUME-DIAG: framebuffer console restore complete
+[  205.867041] eve kernel: nvidia-modeset: WARNING: GPU:0: RESUME-DIAG: notifier wait; offset=0 value=0x00000000 mask=0xc0000000 expected=0x80000000 get=0x6b8 put=0x778 active_heads=0x0 elapsed_ms=3000
+[  235.867042] eve kernel: nvidia-modeset: WARNING: GPU:0: RESUME-DIAG: notifier wait; offset=0 value=0x00000000 mask=0xc0000000 expected=0x80000000 get=0x6b8 put=0x778 active_heads=0x0 elapsed_ms=33000
+[  265.867044] eve kernel: nvidia-modeset: WARNING: GPU:0: RESUME-DIAG: notifier wait; offset=0 value=0x00000000 mask=0xc0000000 expected=0x80000000 get=0x6b8 put=0x778 active_heads=0x0 elapsed_ms=63000

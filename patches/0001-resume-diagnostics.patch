@@ -1,0 +1,184 @@
+--- a/src/nvidia-modeset/include/nvkms-types.h
++++ b/src/nvidia-modeset/include/nvkms-types.h
+@@ -1138,6 +1138,9 @@
+      * functions that use it.
+      */
+     NvBool              skipConsoleRestore       : 1;
++
++    /* Local resume diagnostics: bounded packet logging, protected by NVKMS. */
++    NvU32               resumeDiagDpPacketsRemaining;
+     /*
+      * Indicates that hotplug events that occur while NVKMS is the modeset owner
+      * should trigger console restore modesets.
+--- a/src/nvidia-modeset/src/nvkms-dma.c
++++ b/src/nvidia-modeset/src/nvkms-dma.c
+@@ -198,6 +198,7 @@
+     NVDmaBufferEvoPtr p = &pDevEvo->core->pb;
+     volatile NvU32 *pNotifier = pDevEvo->core->notifierDma.cpuAddress;
+     NvU64 startTime = 0;
++    NvU64 diagLastLogTime = 0;
+ 
+     nvAssert(pNotifier != NULL);
+     pNotifier += offset;
+@@ -209,6 +210,12 @@
+         const NvU32 done_val = done_value << done_base_bit;
+ 
+         if ((val & done_mask) == done_val) {
++            if (diagLastLogTime != 0) {
++                nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++                    "RESUME-DIAG: notifier completed; offset=%u elapsed_ms=%u",
++                    offset,
++                    (NvU32)((nvkms_get_usec() - startTime) / 1000));
++            }
+             return TRUE;
+         }
+ 
+@@ -219,14 +226,36 @@
+         if (nvExceedsTimeoutUSec(
+                 pDevEvo,
+                 &startTime,
+-                NV_EVO_NOTIFIER_SHORT_TIMEOUT_USEC) &&
+-            (p->put_offset == EvoCoreReadGet(p)))
++                NV_EVO_NOTIFIER_SHORT_TIMEOUT_USEC))
+         {
+-            nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
+-                         "Lost display notification (%d:0x%08x); "
+-                         "continuing.", sd, val);
+-            EvoWriteNotifier(pNotifier, done_value << done_base_bit);
+-            return TRUE;
++            const NvU32 getOffset = EvoCoreReadGet(p);
++            const NvU64 now = nvkms_get_usec();
++
++            /* Do not change the wait or its existing synthetic-completion path. */
++            if (diagLastLogTime == 0 ||
++                (now - diagLastLogTime) >= 30000000) {
++                nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
++                    "RESUME-DIAG: notifier wait; offset=%u value=0x%08x "
++                    "mask=0x%08x expected=0x%08x get=0x%x put=0x%x "
++                    "active_heads=0x%x elapsed_ms=%u",
++                    offset, val, done_mask, done_val, getOffset, p->put_offset,
++                    nvGetActiveHeadMask(pDispEvo),
++                    (NvU32)((now - startTime) / 1000));
++                diagLastLogTime = now;
++            }
++
++            if (p->put_offset == getOffset) {
++                nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
++                             "Lost display notification (%d:0x%08x); "
++                             "continuing.", sd, val);
++                nvEvoLogDisp(pDispEvo, EVO_LOG_WARN,
++                    "RESUME-DIAG: synthesizing notifier completion; "
++                    "offset=%u get=0x%x put=0x%x elapsed_ms=%u",
++                    offset, getOffset, p->put_offset,
++                    (NvU32)((now - startTime) / 1000));
++                EvoWriteNotifier(pNotifier, done_value << done_base_bit);
++                return TRUE;
++            }
+         }
+ 
+         nvkms_yield();
+--- a/src/nvidia-modeset/src/nvkms-evo1.c
++++ b/src/nvidia-modeset/src/nvkms-evo1.c
+@@ -339,6 +339,8 @@
+     NV0073_CTRL_SPECIFIC_SET_OD_PACKET_PARAMS params = {
+         .displayId = pHeadState->activeRmId,
+     };
++    NvBool diagTrace;
++    NvU64 diagStartTime = 0;
+ 
+     if (sdp->hb.hb1 == NVT_DP_ADAPTIVE_SYNC_SDP_PACKET_TYPE) {
+         nvAssert(transmitCtrl->frequency == NV_EVO_INFOFRAME_TRANSMIT_FREQUENCY_EVERY_FRAME);
+@@ -384,12 +386,40 @@
+         sizeof(params.aPacket));
+     nvkms_memcpy(params.aPacket, &sdp->hb, params.packetSize);
+ 
++    diagTrace = pDevEvo->resumeDiagDpPacketsRemaining != 0;
++    if (diagTrace) {
++        pDevEvo->resumeDiagDpPacketsRemaining--;
++        nvEvoLogDisp(pDispEvo, EVO_LOG_INFO,
++            "RESUME-DIAG: DP packet begin; head=%u display=0x%x "
++            "type=0x%02x hdr_state=%u active=%u active_heads=0x%x "
++            "control=0x%x size=%u remaining=%u",
++            head, params.displayId, sdp->hb.hb1, pHeadState->hdrInfoFrame.state,
++            nvHeadIsActive(pDispEvo, head), nvGetActiveHeadMask(pDispEvo),
++            params.transmitControl, params.packetSize,
++            pDevEvo->resumeDiagDpPacketsRemaining);
++        diagStartTime = nvkms_get_usec();
++    }
++
+     ret = nvRmApiControl(nvEvoGlobal.clientHandle,
+                          pDevEvo->displayCommonHandle,
+                          NV0073_CTRL_CMD_SPECIFIC_SET_OD_PACKET,
+                          &params,
+                          sizeof(params));
+ 
++    if (diagTrace) {
++        nvEvoLogDisp(pDispEvo,
++            ret == NVOS_STATUS_SUCCESS ? EVO_LOG_INFO : EVO_LOG_ERROR,
++            "RESUME-DIAG: DP packet end; head=%u display=0x%x "
++            "type=0x%02x status=0x%x elapsed_ms=%u",
++            head, params.displayId, sdp->hb.hb1, ret,
++            (NvU32)((nvkms_get_usec() - diagStartTime) / 1000));
++    } else if (ret != NVOS_STATUS_SUCCESS) {
++        nvEvoLogDisp(pDispEvo, EVO_LOG_ERROR,
++            "RESUME-DIAG: DP packet failed outside trace budget; "
++            "head=%u display=0x%x type=0x%02x status=0x%x",
++            head, params.displayId, sdp->hb.hb1, ret);
++    }
++
+     if (ret != NVOS_STATUS_SUCCESS) {
+         nvAssert(!"NV0073_CTRL_CMD_SPECIFIC_SET_OD_PACKET failed");
+     }
+--- a/src/nvidia-modeset/src/nvkms-evo.c
++++ b/src/nvidia-modeset/src/nvkms-evo.c
+@@ -5498,6 +5498,11 @@
+     NVDispEvoRec *pDispEvo;
+     NvU32 dispIndex;
+ 
++    pDevEvo->resumeDiagDpPacketsRemaining = 8;
++    nvEvoLogDev(pDevEvo, EVO_LOG_INFO,
++                "RESUME-DIAG: device resume begin; dispClass=0x%x",
++                pDevEvo->dispClass);
++
+     if (NV0073_CTRL_SYSTEM_GET_CAP(pDevEvo->commonCapsBits,
+                 NV0073_CTRL_SYSTEM_CAPS_CROSS_BAR_SUPPORTED)) {
+         FOR_ALL_EVO_DISPLAYS(pDispEvo, dispIndex, pDevEvo) {
+@@ -5509,6 +5514,8 @@
+ 
+     if (!nvAllocCoreChannelEvo(pDevEvo)) {
+         // free the device if core channel allocation fails
++        nvEvoLogDev(pDevEvo, EVO_LOG_ERROR,
++                    "RESUME-DIAG: core channel allocation failed");
+         nvRevokeDevice(pDevEvo);
+         return FALSE;
+     }
+@@ -5547,6 +5554,9 @@
+ 
+     AllocDIFRState(pDevEvo);
+ 
++    nvEvoLogDev(pDevEvo, EVO_LOG_INFO,
++                "RESUME-DIAG: device resume complete; awaiting display restore");
++
+     return TRUE;
+ }
+ 
+@@ -9888,4 +9898,3 @@
+ 
+     return FALSE;
+ }
+-
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -2387,7 +2387,12 @@
+             drm_mode_config_reset(dev);
+         } else {
+ #if defined(NV_DRM_FBDEV_AVAILABLE)
++            NV_DRM_DEV_LOG_INFO(nv_dev,
++                "RESUME-DIAG: framebuffer console restore begin (helper=%s)",
++                dev->fb_helper != NULL ? "present" : "absent");
+             drm_fb_helper_set_suspend_unlocked(dev->fb_helper, 0);
++            NV_DRM_DEV_LOG_INFO(nv_dev,
++                "RESUME-DIAG: framebuffer console restore complete");
+ #endif
+             drm_kms_helper_poll_enable(dev);
+ 

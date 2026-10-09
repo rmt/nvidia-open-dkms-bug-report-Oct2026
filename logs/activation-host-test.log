@@ -1,0 +1,2 @@
+PASS: absent/connected SST, stale EDID and display cache, forced SST, embedded panel, MST upstream and per-sink presence
+Host test executable retained at /tmp/nvidia-dp-policy.cDcJEY/activation-test
